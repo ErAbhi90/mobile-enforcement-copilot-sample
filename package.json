@@ -1,0 +1,33 @@
+{
+  "name": "mobile-enforcement-copilot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Production-style React Native TypeScript foundation for authentication and session handling in a mobile enforcement application.",
+  "scripts": {
+    "android": "react-native run-android",
+    "ios": "react-native run-ios",
+    "start": "react-native start",
+    "test": "jest",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint . --ext .ts,.tsx",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "18.2.0",
+    "react-native": "0.73.4",
+    "@react-native-async-storage/async-storage": "^1.21.0",
+    "react-native-keychain": "^8.1.2",
+    "react-native-biometrics": "^3.0.1"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.23.7",
+    "@babel/preset-env": "^7.23.7",
+    "@babel/preset-react": "^7.23.3",
+    "@babel/preset-typescript": "^7.23.3",
+    "@types/jest": "^29.5.11",
+    "@types/react": "^18.2.48",
+    "babel-jest": "^29.7.0",
+    "jest": "^29.7.0",
+    "typescript": "^5.3.3"
+  }
+}
