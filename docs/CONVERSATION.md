@@ -30,61 +30,257 @@ enforcement application — one that could be dropped into a real project and
 extended without significant rework.
 
 The entire implementation was generated iteratively through a conversation with
-the GitHub Copilot coding agent.  Each iteration added a module, its tests,
-and the accompanying edge-case hardening until the suite reached 67 passing
-tests with zero failures.
+the GitHub Copilot coding agent.  Nine distinct prompts drove the work, moving
+from the initial scaffold through senior engineer review, targeted refactoring,
+edge-case hardening, a race-condition fix, and a formal PR review.  The suite
+reached 67 passing tests with zero failures.
 
 ---
 
 ## 2. Requests Made to the Agent
 
-The following prompts were issued during the session (paraphrased; no sensitive
-context has been included):
+All nine prompts are listed below in the exact chronological order they were
+issued during the session (paraphrased; no sensitive context has been
+included).
 
-1. **Initial scaffold request**  
-   _"Create a production-style React Native TypeScript foundation for
-   authentication and session handling.  It should include secure token
-   storage, a 10-hour session expiry, biometric re-entry, server-forced logout
-   via WebSocket, and a React hook to expose auth state to components.  All
-   business logic must be unit-testable without a simulator."_
+---
 
-2. **Composition root / wiring**  
-   _"Add a ServiceContainer (composition root) that wires all services
-   together in one place so the rest of the codebase depends only on
-   interfaces."_
+### Prompt 1 — Initial scaffold
 
-3. **AppStateWatcher — background expiry detection**  
-   _"Add a lifecycle watcher that checks session validity every time the app
-   returns to the foreground and triggers a `SESSION_EXPIRED` logout if the
-   session has silently expired while the app was backgrounded.  Include a
-   debounce so rapid AppState transitions don't fire multiple checks."_
+> _"Create a production-style React Native TypeScript foundation for
+> authentication and session handling in a mobile enforcement application.
+> Requirements:_
+> - _Secure token storage using the device keychain (react-native-keychain)._
+> - _A 10-hour session expiry enforced on every authentication check._
+> - _Biometric re-entry (Face ID / Touch ID / Fingerprint) for users returning
+>   to the app after it has been backgrounded._
+> - _Server-forced logout via a WebSocket `force_logout` event._
+> - _A React hook (`useAuth`) that exposes auth state and actions to
+>   functional components._
+> - _A composition root (`ServiceContainer`) that wires all services together
+>   so the rest of the codebase depends only on interfaces._
+> - _All business logic must be unit-testable in a Node environment — no
+>   simulator, no physical device required._
+> - _Unit tests for every module using Jest._"
 
-4. **Edge-case hardening (first pass)**  
-   _"Harden the following edge cases:
-   - AppStateWatcher should not fire a check if the user is already logged out.
-   - BiometricService: a `cancel()` call that arrives while the OS prompt is
-     showing should cause `authenticate()` to return failure regardless of what
-     the OS returned.
-   - AuthService.logout(): should emit the logged-out state even when secure
-     storage cleanup throws.
-   - AppStateWatcher: a stop/start cycle should not skip the first resume check
-     after restarting._"
+**What was produced (commit `45eb750`):**  
+The complete source tree — `auth/AuthService.ts`, `auth/BiometricService.ts`,
+`auth/SessionManager.ts`, `storage/SecureStorageService.ts`,
+`hooks/useAuth.ts`, `store/AuthStore.ts`, `websocket/WebSocketService.ts`,
+`container/ServiceContainer.ts`, `types/auth.types.ts`, `utils/logger.ts` —
+together with five test suites, three Jest mocks, `README.md`, `package.json`,
+`tsconfig.json`, `babel.config.js`, and `jest.config.js`.
 
-5. **Race-condition fix**  
-   _"Fix a race condition in AuthService where a concurrent logout that
-   **completes** before the login API returns is not caught by the
-   `isLoggingOut` boolean flag alone.  Introduce a generation counter to cover
-   both the in-progress and the already-completed logout scenarios.  Remove the
-   double-emit on logout.  Reset the AppStateWatcher debounce clock on stop so
-   the next start always does its first check."_
+---
 
-6. **Documentation**  
-   _"Create a comprehensive Architecture Guide in `docs/ARCHITECTURE.md`."_
+### Prompt 2 — Architecture Guide (initial version)
 
-7. **This document**  
-   _"Create a Markdown (.md) for the whole conversation to share and sanitize
-   it by removing/avoiding sensitive content (credentials, personal information,
-   or confidential/internal system details)."_
+> _"Create a comprehensive Architecture Guide in `docs/ARCHITECTURE.md`.
+> It should cover the layer model, a module reference, the dependency graph,
+> detailed walkthroughs of the four main authentication flows (login, logout,
+> biometric re-entry, force logout), and plain-language justifications for the
+> key design decisions."_
+
+**What was produced (commit `6ca5816`):**  
+`docs/ARCHITECTURE.md` with five sections covering the layer model, module
+reference, dependency graph, flow walkthroughs with ASCII diagrams, and a
+plain-language design-decision table.  A link to the guide was also added to
+`README.md`.
+
+---
+
+### Prompt 3 — Architecture deep-dive: source of truth, testability seams, and senior engineer critical review
+
+> _"Extend the Architecture Guide with three additional sections:_
+> 1. _Where canonical auth state lives — the difference between
+>    `AuthService.currentState`, `AuthStore`, and the `useAuth` hook, and
+>    when to use each._
+> 2. _An explanation of the six testability seams in the codebase and why
+>    each one was created._
+> 3. _An honest senior engineer critical review: what is genuinely good, what
+>    is incomplete or risky in production, and what will cause maintenance pain
+>    as the codebase grows."_
+
+**What was produced (commit `9f86649`):**  
+Three new sections appended to `docs/ARCHITECTURE.md`:
+- **Section 6 — Source of Truth for Auth/Session State:** hierarchy diagram,
+  explanation of why `currentState` is private, the token/session split, and
+  how all four logout triggers converge on the same path.
+- **Section 7 — Testability — Intentional Decoupling Seams:** detailed
+  write-up of all six seams (`ISecureStorageService`, `ISessionManager`,
+  `IAuthApiClient`, `IAuthService`, injected `ReactNativeBiometrics`, global
+  `WebSocket`) with code examples.
+- **Section 8 — Senior Engineer Critical Review:** eight strengths, five risks
+  / open questions, and four specific recommendations for the next iteration.
+
+---
+
+### Prompt 4 — Refactoring per senior engineer review
+
+> _"Apply the four targeted refactoring recommendations from the senior
+> engineer review:_
+> 1. _Extract all storage key strings into a dedicated `StorageKeys.ts` so
+>    there is a single place to audit what is written to the device keychain._
+> 2. _Fix the `SecureStorageService.clearAll()` security bug: entries written
+>    with `{ service: key }` must be deleted with the same option; calling
+>    `resetGenericPassword()` with no arguments only clears the default entry
+>    and leaves all named entries on the device._
+> 3. _Decouple `WebSocketService` from `IAuthService`: replace the direct
+>    `authService.logout()` call with an `onForceLogout` callback injected
+>    in `WebSocketServiceOptions` — the service should not need to know
+>    anything about the auth system._
+> 4. _Make all `AppServices` fields use interface types so callers depend on
+>    contracts, not concrete classes."_
+
+**What was produced (commit `0ecbb25`):**  
+- New file `src/storage/StorageKeys.ts` with a typed `StorageKeys` constant
+  and an `ALL_STORAGE_KEYS` array.
+- `SecureStorageService` updated to accept `knownKeys` at construction;
+  `clearAll()` now removes every named entry individually.
+- `WebSocketService` constructor changed to accept `WebSocketServiceOptions`;
+  no more `IAuthService` import.
+- `ServiceContainer` wires the `onForceLogout` callback and passes
+  `ALL_STORAGE_KEYS` to the storage service.
+- `AppServices` fields converted to interface types.
+- Tests updated to reflect the new behaviour.
+- A new **Section 9 — Refactoring for Separation of Concerns** added to
+  `docs/ARCHITECTURE.md` explaining each change.
+
+---
+
+### Prompt 5 — AppStateWatcher and edge-case hardening
+
+> _"Add a lifecycle module (`AppStateWatcher`) that triggers a
+> `SESSION_EXPIRED` logout every time the app returns to the foreground and
+> the session has silently expired while backgrounded.  Then harden these
+> specific edge cases across the codebase:_
+> - _`AppStateWatcher`: skip the session check if the user is already logged
+>   out (avoid unnecessary storage reads)._
+> - _`AppStateWatcher`: debounce rapid AppState transitions — only one check
+>   per 5-second window._
+> - _`BiometricService`: if `cancel()` is called while the OS biometric prompt
+>   is on screen, `authenticate()` must return `{ success: false }` regardless
+>   of what the OS returned._
+> - _`AuthService.logout()`: must emit the logged-out state even when secure
+>   storage cleanup throws._
+> - _`WebSocketService`: detach all event handlers before calling `close()` so
+>   in-flight messages cannot fire after disconnect."_
+
+**What was produced (commit `5de8ed6`):**  
+- New file `src/lifecycle/AppStateWatcher.ts` with the debounced watcher,
+  idempotent `start()` / `stop()`, and the already-logged-out guard.
+- `BiometricService` extended with the `cancel()` / `cancelled` flag.
+- `AuthService.logout()` refactored so `emitState` is inside the `finally`
+  block.
+- `WebSocketService.disconnect()` now detaches handlers before calling
+  `close()`.
+- `ServiceContainer` wires `biometricService.cancel()` inside the
+  `onForceLogout` callback.
+- 316 new test lines across four test files; `__mocks__/react-native.js`
+  extended with full `AppState` mock support.
+
+---
+
+### Prompt 6 — Race-condition fix and AppStateWatcher stop/start reset
+
+> _"Fix a race condition in `AuthService` where a concurrent logout that
+> **completes** before the login API response arrives is not caught by the
+> `isLoggingOut` boolean flag alone (the flag is reset to `false` when cleanup
+> finishes, so a login that was in-flight can silently re-write just-cleared
+> credentials back into storage)._
+>
+> _Specifically:_
+> - _Introduce a `logoutGeneration` counter that is incremented synchronously
+>   at the start of every `logout()` call.  `login()` must snapshot the
+>   counter before the API call and abort if it has changed on return._
+> - _Remove the duplicate `emitState` call that was emitting the authenticated
+>   state twice on a successful login._
+> - _Reset the `AppStateWatcher` debounce clock (`lastCheckTime = 0`) inside
+>   `stop()` so the next `start()` always performs its first check immediately
+>   even if a check had fired just before `stop()`."_
+
+**What was produced (commit `22a33a5`):**  
+- `AuthService` extended with `logoutGeneration: number`; `login()` aborts if
+  the counter changes during the API round-trip.
+- The duplicate `emitState` in `login()` removed.
+- `AppStateWatcher.stop()` now resets `lastCheckTime` to `0`.
+- Nine new tests added to `AuthService.test.ts` and
+  `AppStateWatcher.test.ts` to cover the new invariants.
+- **Section PR Review — Authentication & Session Hardening** added to
+  `docs/ARCHITECTURE.md` (see Prompt 7 below).
+
+---
+
+### Prompt 7 — PR review as Senior Developer
+
+> _"Review this pull request as a senior developer.  Cover: strengths of the
+> implementation, possible improvements, and clarifying questions that should
+> be answered before merging."_
+
+**What was produced (as part of commit `22a33a5`):**  
+A formal PR review appended to `docs/ARCHITECTURE.md` under
+**"PR Review — Authentication & Session Hardening"**, containing:
+
+**Strengths (5 items):**
+1. Dependency-injection discipline — exemplary; 66 tests run in pure Node in
+   under 2 seconds.
+2. `logoutGeneration` counter closes a real race condition with minimal
+   abstraction.
+3. `emitState` in `finally` — logout state is unconditionally safe.
+4. `AppStateWatcher` is focused, complete, and has symmetric lifecycle.
+5. `BiometricService.cancel()` is narrow and correctly resets per-call.
+
+**Possible improvements (3 items):**
+1. `void authService.logout()` in `AppStateWatcher` swallows errors silently
+   — a one-line comment would document the intent.
+2. `authStore: AuthStore` in `AppServices` references the concrete class while
+   all other fields use interface types — minor inconsistency.
+3. `SessionData` has no `expiresAt` field — expiry policy is spread across two
+   files; suggest storing a computed `expiresAt` if server-authoritative TTLs
+   are ever needed.
+
+**Questions before merge (3 items):**
+1. Who calls `appStateWatcher.start()` and `stop()`, and is the `stop()` call
+   guaranteed on app teardown?
+2. Is it acceptable that `cancel()` does not dismiss the OS biometric dialog —
+   the app is in the correct state, but the dialog may still be visible?
+3. Does the navigation layer consume `logoutReason: SESSION_EXPIRED` to show a
+   meaningful "session expired" message rather than silently dropping the user
+   at the login screen?
+
+---
+
+### Prompt 8 — Session conversation document
+
+> _"Create a Markdown file (`docs/CONVERSATION.md`) for the whole conversation
+> to share.  Sanitize it by removing / avoiding sensitive content (credentials,
+> personal information, or confidential / internal system details)."_
+
+**What was produced (commit `4a62df3`):**  
+`docs/CONVERSATION.md` with nine sections: session overview, prompts (initial
+version — 7 entries, since prompts 3, 4, and 7 were missing), what was built,
+key design decisions, edge cases handled, test coverage, how to run, what was
+intentionally left out, and suggested next steps.
+
+---
+
+### Prompt 9 — Verify and complete the conversation document
+
+> _"Verify `CONVERSATION.md` has all the prompts that I provided.  If not,
+> add all the prompts step by step until creating a PR review as Senior Dev
+> prompt."_
+
+**What was produced (this commit):**  
+The current document.  Section 2 was rewritten from scratch with all nine
+prompts in the correct chronological order.  The prompts that were missing from
+the initial version were:
+- **Prompt 3** — Architecture deep-dive (source of truth, testability seams,
+  senior engineer critical review).
+- **Prompt 4** — Refactoring per senior engineer review (StorageKeys,
+  clearAll security fix, WebSocketService decoupling, AppServices interface
+  types).
+- **Prompt 7** — PR review as Senior Developer.
+- **Prompt 9** — This verification prompt itself.
 
 ---
 
