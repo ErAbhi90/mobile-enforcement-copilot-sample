@@ -101,9 +101,20 @@ export class WebSocketService implements IWebSocketService {
     };
   }
 
-  /** Closes the connection and clears the internal reference. */
+  /** Closes the connection and clears the internal reference.
+   *
+   * Event handlers are detached before close() is called so that no
+   * in-flight messages or close/error callbacks fire after disconnect
+   * (e.g. a message arriving between close() and the socket fully shutting
+   * down would otherwise invoke onForceLogout after we've already cleaned up).
+   */
   disconnect(): void {
     if (this.ws) {
+      // Detach handlers first so stale callbacks cannot fire during teardown.
+      this.ws.onopen = null;
+      this.ws.onmessage = null;
+      this.ws.onclose = null;
+      this.ws.onerror = null;
       this.ws.close();
       this.ws = null;
     }

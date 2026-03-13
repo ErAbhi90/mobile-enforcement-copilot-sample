@@ -553,7 +553,7 @@ global.WebSocket = jest.fn().mockImplementation(() => {
 | `ReactNativeBiometrics` | Optional constructor parameter | Native biometric sensor |
 | Global `WebSocket` | `global.WebSocket = jest.fn()` | Real WebSocket server |
 
-The business logic layer (AuthService, SessionManager, WebSocketService) has **no React imports** at all. This means every business-logic test runs in plain Node.js with no jsdom, no React test renderer, and no simulator — the full 43-test suite completes in under 1.5 seconds.
+The business logic layer (AuthService, SessionManager, WebSocketService, AppStateWatcher) has **no React imports** at all. This means every business-logic test runs in plain Node.js with no jsdom, no React test renderer, and no simulator — the full 65-test suite completes in under 2 seconds.
 
 ---
 
@@ -589,7 +589,7 @@ A listener that subscribes gets the current state synchronously before the first
 **8. `AuthStore` for non-React imperative access.**
 Navigation guards, HTTP interceptors, and background tasks need to read auth state without being inside a React component. `AuthStore.getState()` satisfies this without a second subscription and without pulling in React.
 
-**9. All 43 tests run in pure Node in under 1.5 seconds.**
+**9. All 65 tests run in pure Node in under 2 seconds.**
 Fast, reliable, native-free tests are the bedrock of sustainable development. The test suite covers every service independently and with controlled mock behavior.
 
 ---
@@ -691,7 +691,7 @@ On every cold start, the app briefly displays the login screen, then redirects t
 | Dimension | Rating | Key issue |
 |---|---|---|
 | Architecture & layering | ⭐⭐⭐⭐⭐ | Clean separation, DI throughout |
-| Testability | ⭐⭐⭐⭐⭐ | 44 tests, pure Node, fast |
+| Testability | ⭐⭐⭐⭐⭐ | 65 tests, pure Node, fast |
 | Token lifecycle | ⭐⭐ | No refresh logic; see Section 9 for `clearAll()` fix |
 | WebSocket reliability | ⭐⭐ | No reconnect; token in URL |
 | State initialization | ⭐⭐⭐ | No `isInitializing` flag causes flicker |

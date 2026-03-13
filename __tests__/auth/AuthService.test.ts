@@ -15,11 +15,14 @@
  *  - Emits an authenticated state with the user object.
  *  - Transitions through a loading state before resolving.
  *  - Sets an error state and re-throws on API failure.
+ *  - Aborts (throws, emits error state) if isLoggingOut is true when the API
+ *    call returns — prevents a concurrent logout being overwritten.
  *
  * logout()
  *  - Removes both tokens and clears the session.
  *  - Emits a logged-out state carrying the logout reason.
  *  - Ignores duplicate concurrent calls (deduplication guard).
+ *  - Emits the logged-out state even when storage cleanup throws.
  *
  * isAuthenticated()
  *  - Returns true when a token exists AND the session is valid.
@@ -169,6 +172,36 @@ describe('AuthService', () => {
       expect(errorStates[0].isAuthenticated).toBe(false);
       expect(errorStates[0].error).toBe('Invalid credentials');
     });
+
+    it('should abort login if a logout is triggered while the API call is in flight', async () => {
+      // The API call resolves, but by the time it does, isLoggingOut is true
+      // because logout() was called concurrently.
+      mockApiClient.authenticate.mockImplementation(async () => {
+        // Simulate the logout starting while the network round-trip is in progress.
+        // We directly set the private flag via bracket notation to avoid async ordering issues.
+        (authService as unknown as Record<string, boolean>)['isLoggingOut'] = true;
+        return validTokens;
+      });
+
+      const errorStates: AuthState[] = [];
+      authService.onStateChange(s => {
+        if (s.error) errorStates.push({ ...s });
+      });
+
+      await expect(authService.login(credentials)).rejects.toThrow(
+        'Login aborted: a logout was triggered during authentication',
+      );
+
+      // Tokens should NOT have been written.
+      expect(mockStorage.setItem).not.toHaveBeenCalled();
+
+      // An error state should have been emitted.
+      expect(errorStates.length).toBeGreaterThan(0);
+      expect(errorStates[0].isAuthenticated).toBe(false);
+
+      // Cleanup: reset the flag so subsequent tests are not affected.
+      (authService as unknown as Record<string, boolean>)['isLoggingOut'] = false;
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -224,6 +257,23 @@ describe('AuthService', () => {
       await authService.logout();
 
       expect(capturedState?.logoutReason).toBe(LogoutReason.USER_INITIATED);
+    });
+
+    it('should emit the logged-out state even when storage cleanup throws', async () => {
+      mockStorage.removeItem.mockRejectedValue(new Error('Storage failure'));
+      mockSessionManager.clearSession.mockRejectedValue(new Error('Session clear failure'));
+
+      let capturedState: AuthState | undefined;
+      authService.onStateChange(s => {
+        if (s.logoutReason) capturedState = { ...s };
+      });
+
+      // logout() must not throw even when cleanup fails.
+      await expect(authService.logout(LogoutReason.SESSION_EXPIRED)).resolves.toBeUndefined();
+
+      // The UI must still receive the logged-out transition.
+      expect(capturedState?.isAuthenticated).toBe(false);
+      expect(capturedState?.logoutReason).toBe(LogoutReason.SESSION_EXPIRED);
     });
   });
 

@@ -15,6 +15,11 @@
  *  - authenticate() returns { success: false, error } when no sensor is present,
  *    without calling simplePrompt at all.
  *  - authenticate() passes a custom prompt message to simplePrompt.
+ *  - cancel() causes a subsequent completed authenticate() to return
+ *    { success: false, error: 'Authentication cancelled' } even if the OS
+ *    returned a successful biometric result.
+ *  - cancel() flag is reset at the start of each new authenticate() call so
+ *    a previous cancel does not affect the next authentication.
  */
 
 import { BiometricService } from '../../src/auth/BiometricService';
@@ -106,6 +111,72 @@ describe('BiometricService', () => {
       expect(mockInstance.simplePrompt).toHaveBeenCalledWith({
         promptMessage: 'Re-authenticate to proceed',
       });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // cancel()
+  // -------------------------------------------------------------------------
+
+  describe('cancel()', () => {
+    it('should cause authenticate() to return { success: false } when called while the OS prompt is pending', async () => {
+      mockInstance.isSensorAvailable.mockResolvedValue({
+        available: true,
+        biometryType: 'FaceID',
+      });
+
+      // Use a deferred promise so we can call cancel() while the prompt is
+      // still in flight — exactly what happens when a force-logout arrives
+      // mid-biometric.
+      let resolvePrompt!: (value: { success: boolean }) => void;
+      mockInstance.simplePrompt.mockReturnValue(
+        new Promise<{ success: boolean }>(resolve => {
+          resolvePrompt = resolve;
+        }),
+      );
+
+      // Start authentication — it will suspend inside simplePrompt.
+      const authPromise = service.authenticate();
+
+      // Cancel fires while the prompt is on screen.
+      service.cancel();
+
+      // The OS eventually grants success, but cancel() should override it.
+      resolvePrompt({ success: true });
+      const result = await authPromise;
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Authentication cancelled');
+    });
+
+    it('should reset the cancelled flag at the start of the next authenticate() call', async () => {
+      mockInstance.isSensorAvailable.mockResolvedValue({
+        available: true,
+        biometryType: 'FaceID',
+      });
+
+      // First call: cancel while in-flight → expect failure.
+      let resolveFirst!: (value: { success: boolean }) => void;
+      mockInstance.simplePrompt.mockReturnValueOnce(
+        new Promise<{ success: boolean }>(resolve => {
+          resolveFirst = resolve;
+        }),
+      );
+      const firstPromise = service.authenticate();
+      service.cancel();
+      resolveFirst({ success: true });
+      const firstResult = await firstPromise;
+      expect(firstResult.success).toBe(false);
+
+      // Second call: no cancel during the prompt — the flag was reset by
+      // authenticate() itself at the start of the new call.
+      mockInstance.simplePrompt.mockResolvedValueOnce({ success: true });
+      const secondResult = await service.authenticate();
+      expect(secondResult.success).toBe(true);
+    });
+
+    it('should be harmless when called with no authentication in progress', async () => {
+      expect(() => service.cancel()).not.toThrow();
     });
   });
 });

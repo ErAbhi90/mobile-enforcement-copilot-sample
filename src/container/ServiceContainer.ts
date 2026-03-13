@@ -16,10 +16,14 @@
  *   // At the top of your App.tsx (or equivalent entry point):
  *   import { createAppServices } from './container/ServiceContainer';
  *   import { MyAuthApiClient } from './api/MyAuthApiClient';
+ *   import { AppState } from 'react-native';
  *
- *   const services = createAppServices(new MyAuthApiClient());
+ *   const services = createAppServices(new MyAuthApiClient(), AppState);
+ *   services.appStateWatcher.start();
  *
  *   // Pass services down via React Context or prop drilling.
+ *   // Call services.appStateWatcher.stop() and services.authStore.destroy()
+ *   // when the app unmounts.
  */
 
 import { SecureStorageService } from '../storage/SecureStorageService';
@@ -28,6 +32,7 @@ import { SessionManager } from '../auth/SessionManager';
 import { AuthService, IAuthApiClient, IAuthService } from '../auth/AuthService';
 import { BiometricService, IBiometricService } from '../auth/BiometricService';
 import { WebSocketService, IWebSocketService } from '../websocket/WebSocketService';
+import { AppStateWatcher, IAppStateModule, IAppStateWatcher } from '../lifecycle/AppStateWatcher';
 import { AuthStore } from '../store/AuthStore';
 import { LogoutReason } from '../types/auth.types';
 
@@ -44,6 +49,7 @@ export interface AppServices {
   authService: IAuthService;
   biometricService: IBiometricService;
   webSocketService: IWebSocketService;
+  appStateWatcher: IAppStateWatcher;
   authStore: AuthStore;
 }
 
@@ -56,8 +62,13 @@ export interface AppServices {
  *
  * @param apiClient - Your concrete IAuthApiClient implementation.
  *   Provide a mock during integration tests.
+ * @param appStateModule - The React Native AppState object (or a test mock).
+ *   Injected here so AppStateWatcher has no direct react-native dependency.
  */
-export function createAppServices(apiClient: IAuthApiClient): AppServices {
+export function createAppServices(
+  apiClient: IAuthApiClient,
+  appStateModule: IAppStateModule,
+): AppServices {
   // ALL_STORAGE_KEYS makes clearAll() remove every named keychain entry rather
   // than only the default (no-service) entry.
   const secureStorage = new SecureStorageService(ALL_STORAGE_KEYS);
@@ -66,11 +77,18 @@ export function createAppServices(apiClient: IAuthApiClient): AppServices {
   const biometricService = new BiometricService();
 
   // onForceLogout is the only coupling point between WebSocketService and the
-  // auth system.  WebSocketService receives a plain callback; it never imports
-  // or knows about AuthService.
+  // auth system.  It also cancels any in-progress biometric prompt so the
+  // unlock flow does not complete after the server has forced a logout.
   const webSocketService = new WebSocketService({
-    onForceLogout: () => void authService.logout(LogoutReason.FORCE_LOGOUT),
+    onForceLogout: () => {
+      biometricService.cancel();
+      void authService.logout(LogoutReason.FORCE_LOGOUT);
+    },
   });
+
+  // AppStateWatcher checks session validity on every app resume so that
+  // sessions that expired while the app was backgrounded are caught promptly.
+  const appStateWatcher = new AppStateWatcher(authService, appStateModule);
 
   const authStore = new AuthStore(authService);
 
@@ -78,6 +96,7 @@ export function createAppServices(apiClient: IAuthApiClient): AppServices {
     authService,
     biometricService,
     webSocketService,
+    appStateWatcher,
     authStore,
   };
 }

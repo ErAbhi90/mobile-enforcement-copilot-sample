@@ -17,6 +17,13 @@
  *    a user tap AND a WebSocket force-logout arriving simultaneously.
  *  - State is broadcast synchronously to all registered listeners so both
  *    hook-based and store-based consumers stay in sync.
+ *
+ * Edge-case handling:
+ *  - Logout emits the logged-out state in a `finally` block so the UI always
+ *    transitions to logged-out even if secure-storage cleanup partially fails.
+ *  - Login checks `isLoggingOut` after the API call returns; if a concurrent
+ *    logout fired while the network round-trip was in flight, the login is
+ *    aborted rather than overwriting the newly-cleared credentials.
  */
 
 import { ISecureStorageService } from '../storage/SecureStorageService';
@@ -95,6 +102,16 @@ export class AuthService implements IAuthService {
       const { accessToken, refreshToken, user } =
         await this.apiClient.authenticate(credentials);
 
+      // If a logout was triggered while the API call was in flight (e.g. a
+      // WebSocket force-logout), abort the login rather than re-writing the
+      // just-cleared credentials back into storage.
+      if (this.isLoggingOut) {
+        const message = 'Login aborted: a logout was triggered during authentication';
+        logger.warn(message);
+        this.emitState({ isAuthenticated: false, isLoading: false, error: message });
+        throw new Error(message);
+      }
+
       // Persist tokens before starting the session so that a crash between
       // the two writes does not leave a session without tokens.
       await this.storageService.setItem(ACCESS_TOKEN, accessToken);
@@ -122,6 +139,12 @@ export class AuthService implements IAuthService {
    * The `isLoggingOut` flag is set synchronously before the first `await`
    * so that any concurrent call (e.g. a second WebSocket event) sees it and
    * returns immediately, preventing double-wipes.
+   *
+   * `isLoggingOut` is reset to false before `emitState` so that a state-change
+   * listener that calls `logout()` again (e.g. a retry after failure) is not
+   * blocked by a stale guard.  `emitState` is still inside the `finally` block
+   * so the UI always transitions to logged-out even when storage cleanup
+   * partially fails.
    */
   async logout(reason: LogoutReason = LogoutReason.USER_INITIATED): Promise<void> {
     if (this.isLoggingOut) {
@@ -138,9 +161,15 @@ export class AuthService implements IAuthService {
         this.storageService.removeItem(REFRESH_TOKEN),
         this.sessionManager.clearSession(),
       ]);
-      this.emitState({ isAuthenticated: false, isLoading: false, logoutReason: reason });
+    } catch (error) {
+      // Storage cleanup failing is not a reason to leave the user stuck in an
+      // authenticated UI state.  Log it for diagnostics and continue.
+      logger.error('Error during logout cleanup — proceeding with state update', error);
     } finally {
+      // Reset the guard before emitting state so that any synchronous
+      // listener that re-calls logout() is not blocked by the stale flag.
       this.isLoggingOut = false;
+      this.emitState({ isAuthenticated: false, isLoading: false, logoutReason: reason });
     }
   }
 

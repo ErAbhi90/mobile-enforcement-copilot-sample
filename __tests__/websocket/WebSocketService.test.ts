@@ -18,6 +18,8 @@
  *  - An unrelated message type does NOT invoke the callback.
  *  - A malformed (non-JSON) message is ignored without throwing.
  *  - disconnect() closes the socket and isConnected() returns false.
+ *  - disconnect() detaches all event handlers before closing so that
+ *    in-flight messages or close events do not fire after teardown.
  *  - connect() disconnects any existing connection before opening a new one.
  */
 
@@ -137,5 +139,21 @@ describe('WebSocketService', () => {
     ws1.simulateOpen();
     connect('ws://host2', 'token2'); // triggers re-connect
     expect(ws1.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('should detach all event handlers before closing so stale callbacks cannot fire', () => {
+    const ws = connect();
+    ws.simulateOpen();
+
+    // We verify by checking that after disconnect, the handler properties are null.
+    // Access via the mock instance directly since the WS ref is internal.
+    wsService.disconnect();
+
+    // After disconnect the handlers should be null — a message arriving from
+    // the underlying socket after teardown should not invoke onForceLogout.
+    expect(ws.onmessage).toBeNull();
+    expect(ws.onclose).toBeNull();
+    expect(ws.onopen).toBeNull();
+    expect(ws.onerror).toBeNull();
   });
 });
