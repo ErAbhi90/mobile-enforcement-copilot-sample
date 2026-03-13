@@ -119,6 +119,11 @@ export class AppStateWatcher implements IAppStateWatcher {
     this.unsubscribeAuthState?.();
     this.unsubscribeAuthState = null;
 
+    // Reset the debounce clock so the next start()/stop() cycle begins fresh.
+    // Without this, a logout → immediate re-login → app resume would skip the
+    // first session check because the clock from the old session is still set.
+    this.lastCheckAt = 0;
+
     logger.info('AppStateWatcher stopped');
   }
 

@@ -15,8 +15,10 @@
  *  - Emits an authenticated state with the user object.
  *  - Transitions through a loading state before resolving.
  *  - Sets an error state and re-throws on API failure.
- *  - Aborts (throws, emits error state) if isLoggingOut is true when the API
- *    call returns — prevents a concurrent logout being overwritten.
+ *  - Aborts (throws, emits error state exactly once) when logout() is called
+ *    while the API call is in flight — regardless of whether the logout is
+ *    still in progress or has already completed when the API returns.
+ *  - Does NOT write tokens to storage when it aborts.
  *
  * logout()
  *  - Removes both tokens and clears the session.
@@ -173,13 +175,17 @@ describe('AuthService', () => {
       expect(errorStates[0].error).toBe('Invalid credentials');
     });
 
-    it('should abort login if a logout is triggered while the API call is in flight', async () => {
-      // The API call resolves, but by the time it does, isLoggingOut is true
-      // because logout() was called concurrently.
+    it('should abort login and emit error state exactly once when logout fires during the API call', async () => {
+      // Sub-case (a): logout is still in progress when the API response arrives.
+      // We trigger logout() from inside the authenticate mock so it sets the
+      // logoutGeneration counter synchronously while the storage cleanup is still
+      // pending. No private-field access required.
+      mockStorage.removeItem.mockResolvedValue(undefined);
+      mockSessionManager.clearSession.mockResolvedValue(undefined);
+
       mockApiClient.authenticate.mockImplementation(async () => {
-        // Simulate the logout starting while the network round-trip is in progress.
-        // We directly set the private flag via bracket notation to avoid async ordering issues.
-        (authService as unknown as Record<string, boolean>)['isLoggingOut'] = true;
+        // Start a concurrent logout — this increments logoutGeneration synchronously.
+        void authService.logout(LogoutReason.FORCE_LOGOUT);
         return validTokens;
       });
 
@@ -189,18 +195,44 @@ describe('AuthService', () => {
       });
 
       await expect(authService.login(credentials)).rejects.toThrow(
-        'Login aborted: a logout was triggered during authentication',
+        'Login aborted: logged out during authentication',
       );
 
       // Tokens should NOT have been written.
       expect(mockStorage.setItem).not.toHaveBeenCalled();
 
-      // An error state should have been emitted.
-      expect(errorStates.length).toBeGreaterThan(0);
+      // Error state should have been emitted exactly once (no double-emit).
+      expect(errorStates).toHaveLength(1);
       expect(errorStates[0].isAuthenticated).toBe(false);
+    });
 
-      // Cleanup: reset the flag so subsequent tests are not affected.
-      (authService as unknown as Record<string, boolean>)['isLoggingOut'] = false;
+    it('should abort login even when the concurrent logout fully completes before the API returns', async () => {
+      // Sub-case (b): logout starts AND finishes (storage cleared) before the API
+      // response arrives. The old isLoggingOut flag would have been reset to false
+      // already, but the logoutGeneration counter detects the completed logout.
+      mockStorage.removeItem.mockResolvedValue(undefined);
+      mockSessionManager.clearSession.mockResolvedValue(undefined);
+
+      let resolveAuthenticate!: (value: typeof validTokens) => void;
+      mockApiClient.authenticate.mockReturnValue(
+        new Promise<typeof validTokens>(resolve => {
+          resolveAuthenticate = resolve;
+        }),
+      );
+
+      const loginPromise = authService.login(credentials);
+
+      // Fully await the logout so storage cleanup and the isLoggingOut reset
+      // both complete before the API response arrives.
+      await authService.logout(LogoutReason.FORCE_LOGOUT);
+
+      // Now deliver the API response — login should still abort.
+      resolveAuthenticate(validTokens);
+
+      await expect(loginPromise).rejects.toThrow(
+        'Login aborted: logged out during authentication',
+      );
+      expect(mockStorage.setItem).not.toHaveBeenCalled();
     });
   });
 

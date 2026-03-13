@@ -21,9 +21,14 @@
  * Edge-case handling:
  *  - Logout emits the logged-out state in a `finally` block so the UI always
  *    transitions to logged-out even if secure-storage cleanup partially fails.
- *  - Login checks `isLoggingOut` after the API call returns; if a concurrent
- *    logout fired while the network round-trip was in flight, the login is
- *    aborted rather than overwriting the newly-cleared credentials.
+ *  - A `logoutGeneration` counter is incremented synchronously at the start of
+ *    every `logout()` call.  `login()` snapshots the counter before the API
+ *    round-trip and compares it afterwards.  This catches two separate races:
+ *    (a) a concurrent logout is still in progress when the API returns, and
+ *    (b) a concurrent logout *completed* (storage cleared) before the API
+ *    returned — in which case `isLoggingOut` would already be false but the
+ *    generation counter has advanced, signalling that credentials must not be
+ *    re-written.
  */
 
 import { ISecureStorageService } from '../storage/SecureStorageService';
@@ -81,6 +86,14 @@ export class AuthService implements IAuthService {
   /** Guards against concurrent / duplicate logout invocations. */
   private isLoggingOut = false;
 
+  /**
+   * Incremented synchronously at the start of every logout() call, before any
+   * async work.  login() snapshots this before the API call and re-checks
+   * after: a mismatch means a logout fired (and may have already completed)
+   * while the network round-trip was in flight.
+   */
+  private logoutGeneration = 0;
+
   private readonly stateListeners = new Set<(state: AuthState) => void>();
 
   private currentState: AuthState = { isAuthenticated: false, isLoading: false };
@@ -98,18 +111,19 @@ export class AuthService implements IAuthService {
   async login(credentials: LoginCredentials): Promise<AuthUser> {
     this.emitState({ ...this.currentState, isLoading: true, error: undefined });
 
+    // Capture the generation before the network call so we can detect any
+    // logout that fires (and possibly completes) during the round-trip.
+    const generationAtStart = this.logoutGeneration;
+
     try {
       const { accessToken, refreshToken, user } =
         await this.apiClient.authenticate(credentials);
 
-      // If a logout was triggered while the API call was in flight (e.g. a
-      // WebSocket force-logout), abort the login rather than re-writing the
-      // just-cleared credentials back into storage.
-      if (this.isLoggingOut) {
-        const message = 'Login aborted: a logout was triggered during authentication';
-        logger.warn(message);
-        this.emitState({ isAuthenticated: false, isLoading: false, error: message });
-        throw new Error(message);
+      // If a logout fired while the API call was in flight — whether it is
+      // still in progress or has already completed — abort the login rather
+      // than re-writing just-cleared credentials back into storage.
+      if (this.logoutGeneration !== generationAtStart) {
+        throw new Error('Login aborted: logged out during authentication');
       }
 
       // Persist tokens before starting the session so that a crash between
@@ -136,9 +150,10 @@ export class AuthService implements IAuthService {
   /**
    * Clears all auth material and notifies listeners.
    *
-   * The `isLoggingOut` flag is set synchronously before the first `await`
+   * `logoutGeneration` is incremented synchronously before the first `await`
    * so that any concurrent call (e.g. a second WebSocket event) sees it and
-   * returns immediately, preventing double-wipes.
+   * returns immediately, and so that an in-flight login() can detect that a
+   * logout occurred even if cleanup finished before the API response arrived.
    *
    * `isLoggingOut` is reset to false before `emitState` so that a state-change
    * listener that calls `logout()` again (e.g. a retry after failure) is not
@@ -153,6 +168,7 @@ export class AuthService implements IAuthService {
     }
 
     this.isLoggingOut = true;
+    this.logoutGeneration++;
     logger.info(`Logging out (reason: ${reason})`);
 
     try {

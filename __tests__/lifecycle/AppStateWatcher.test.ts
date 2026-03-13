@@ -289,5 +289,28 @@ describe('AppStateWatcher', () => {
       // We verify via the isAuthenticated call count.
       expect(authMock.service.isAuthenticated).not.toHaveBeenCalled();
     });
+
+    it('should reset the debounce clock so a stop/start cycle does not skip the first resume check', async () => {
+      authMock.service.isAuthenticated.mockResolvedValue(true);
+      watcher.start();
+
+      // First check — sets lastCheckAt.
+      await appStateMock.simulateChange('active');
+      expect(authMock.service.isAuthenticated).toHaveBeenCalledTimes(1);
+
+      // Stop and immediately restart (simulates logout → re-login).
+      watcher.stop();
+
+      // Re-create mock infra for the second start() call.
+      appStateMock = makeAppStateMock();
+      authMock = makeAuthServiceMock(/* initialAuthenticated */ true);
+      watcher = new AppStateWatcher(authMock.service, appStateMock.module);
+      watcher.start();
+
+      // First resume after the new start() — should NOT be debounced even though
+      // a check ran (on the old instance) just moments ago.
+      await appStateMock.simulateChange('active');
+      expect(authMock.service.isAuthenticated).toHaveBeenCalledTimes(1);
+    });
   });
 });

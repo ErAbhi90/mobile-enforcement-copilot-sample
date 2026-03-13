@@ -553,7 +553,7 @@ global.WebSocket = jest.fn().mockImplementation(() => {
 | `ReactNativeBiometrics` | Optional constructor parameter | Native biometric sensor |
 | Global `WebSocket` | `global.WebSocket = jest.fn()` | Real WebSocket server |
 
-The business logic layer (AuthService, SessionManager, WebSocketService, AppStateWatcher) has **no React imports** at all. This means every business-logic test runs in plain Node.js with no jsdom, no React test renderer, and no simulator — the full 65-test suite completes in under 2 seconds.
+The business logic layer (AuthService, SessionManager, WebSocketService, AppStateWatcher) has **no React imports** at all. This means every business-logic test runs in plain Node.js with no jsdom, no React test renderer, and no simulator — the full 67-test suite completes in under 2 seconds.
 
 ---
 
@@ -589,7 +589,7 @@ A listener that subscribes gets the current state synchronously before the first
 **8. `AuthStore` for non-React imperative access.**
 Navigation guards, HTTP interceptors, and background tasks need to read auth state without being inside a React component. `AuthStore.getState()` satisfies this without a second subscription and without pulling in React.
 
-**9. All 65 tests run in pure Node in under 2 seconds.**
+**9. All 67 tests run in pure Node in under 2 seconds.**
 Fast, reliable, native-free tests are the bedrock of sustainable development. The test suite covers every service independently and with controlled mock behavior.
 
 ---
@@ -691,7 +691,7 @@ On every cold start, the app briefly displays the login screen, then redirects t
 | Dimension | Rating | Key issue |
 |---|---|---|
 | Architecture & layering | ⭐⭐⭐⭐⭐ | Clean separation, DI throughout |
-| Testability | ⭐⭐⭐⭐⭐ | 65 tests, pure Node, fast |
+| Testability | ⭐⭐⭐⭐⭐ | 67 tests, pure Node, fast |
 | Token lifecycle | ⭐⭐ | No refresh logic; see Section 9 for `clearAll()` fix |
 | WebSocket reliability | ⭐⭐ | No reconnect; token in URL |
 | State initialization | ⭐⭐⭐ | No `isInitializing` flag causes flicker |
@@ -851,3 +851,124 @@ ServiceContainer  ──→ StorageKeys          ← NEW (was implicit in two pl
 ```
 
 The three inter-service coupling arrows that previously crossed layer boundaries (`WebSocketService → IAuthService`, implicit key sharing) have been replaced by: one callback (`onForceLogout`), one shared constants file (`StorageKeys`), and one constructor parameter (`knownKeys`).
+
+---
+
+## PR Review — Authentication & Session Hardening
+
+> **Reviewer context:** This review covers the complete PR that introduced the
+> edge-case safeguards described above: `AppStateWatcher`, `BiometricService.cancel()`,
+> `AuthService` logout/login race fixes, and `WebSocketService` handler cleanup.
+
+---
+
+### Strengths
+
+**1. The dependency-injection discipline is exemplary.**
+Every service accepts its dependencies as constructor parameters that are typed
+as interfaces. `AppStateWatcher` receives `IAppStateModule` rather than
+importing `AppState` from `react-native`, `WebSocketService` receives a plain
+`onForceLogout` callback rather than a reference to `IAuthService`, and
+`BiometricService` accepts an optional `ReactNativeBiometrics` instance. The
+result is a test suite of 66 tests that runs in pure Node in under 2 seconds,
+with zero native binaries required. This is exactly the kind of architectural
+discipline that keeps mobile codebases maintainable at scale.
+
+**2. The `logoutGeneration` counter closes a real race condition cleanly.**
+The earlier `isLoggingOut` boolean only caught the case where a concurrent
+logout was *still running* when the API response arrived. A fast storage
+cleanup (which is realistic) would reset the flag before the API returned,
+allowing login to silently re-write just-cleared credentials. The generation
+counter increments synchronously at the start of `logout()`, so `login()` can
+detect both the in-progress and the already-completed case with one comparison.
+The fix is minimal — one field, no new abstractions.
+
+**3. Logout state emission is unconditionally safe.**
+Moving `emitState` into the `finally` block (and resetting `isLoggingOut`
+before it fires) means two things: the UI always transitions to logged-out even
+when keychain cleanup throws, and state-change listeners that re-enter
+`logout()` are not blocked by a stale guard. These are the kinds of subtle
+invariants that matter in long-running processes.
+
+**4. `AppStateWatcher` is focused and complete.**
+The class does exactly one thing: map foreground-resume events to a session
+validity check. It handles the obvious sub-cases (not authenticated → skip,
+within debounce window → skip, concurrent logout already running → skip
+re-trigger) without leaking any auth-domain knowledge. The idempotent `start()`
+and the symmetric `stop()` (which tears down both the AppState subscription and
+the internal `onStateChange` mirror) make lifecycle management straightforward
+for the caller.
+
+**5. `BiometricService.cancel()` is narrow and correct.**
+The cancelled flag is reset at the *start* of each `authenticate()` call, so a
+stale `cancel()` from a previous session never bleeds into the next one. The
+flag is checked after `simplePrompt()` returns rather than before the call,
+which correctly handles the main scenario (force-logout arrives while the OS
+dialog is visible).
+
+---
+
+### Possible improvements
+
+**1. `void authService.logout()` in `AppStateWatcher` swallows errors silently.**
+The fire-and-forget call to `logout()` means that if the logout fails
+unexpectedly, there is no logging at the `AppStateWatcher` level. This is
+acceptable because `logout()` already logs and swallows its own cleanup errors
+internally — but it is worth noting for future reviewers who might wonder why
+the watcher does not observe the outcome.
+*Suggestion:* A one-line comment at the call site would be sufficient:
+```typescript
+// logout() handles its own errors internally; fire-and-forget is intentional.
+void this.authService.logout(LogoutReason.SESSION_EXPIRED);
+```
+
+**2. `AuthStore` is typed as a concrete class in `AppServices`.**
+All other `AppServices` fields use interface types (`IAuthService`,
+`IWebSocketService`, etc.), but `authStore: AuthStore` references the concrete
+class. This is a minor inconsistency — `AuthStore` is simple enough that a
+separate `IAuthStore` interface would be boilerplate — but it does mean
+consumers of `AppServices` have a compile-time dependency on the concrete class.
+*Suggestion:* Either extract an `IAuthStore` interface with `getState()` and
+`destroy()`, or leave it and add a comment acknowledging the intentional
+exception.
+
+**3. `SessionData` has no `expiresAt` field — expiry is computed on every read.**
+The current design recomputes `Date.now() - session.createdAt < SESSION_DURATION_MS`
+on every `isSessionValid()` call. This is correct, but it means the expiry
+policy is spread across two files (`SessionManager.ts` for the computation,
+`auth.types.ts` for the data shape). If a product decision changes the expiry
+to be per-user or server-authoritative, both files need updating.
+*Suggestion (future):** If server-side session TTLs are ever needed, store
+an `expiresAt` timestamp (set by the API response) rather than deriving it
+from a fixed constant.
+
+---
+
+### Questions / clarifications before merge
+
+**1. Who calls `appStateWatcher.start()` and `appStateWatcher.stop()`?**
+The composition root creates `AppStateWatcher` but intentionally does not call
+`start()` — that is left to `App.tsx`. This is the right design (lifecycle
+management belongs at the entry point), but the usage comment in
+`ServiceContainer.ts` should be explicit about when `stop()` must be called
+(app unmount, or root component `useEffect` cleanup). A missed `stop()` leaks
+two subscriptions per `createAppServices()` call.
+
+**2. Is `BiometricService.cancel()` the right level of abstraction?**
+`cancel()` sets a flag that is checked after the OS biometric prompt returns —
+it does not actually dismiss the OS dialog. On iOS, Face ID and Touch ID prompts
+cannot be programmatically dismissed via `react-native-biometrics`. This means
+that from the user's perspective, the prompt may still be visible on screen even
+after a force-logout has been processed. The app is now in a correct *state*
+(logged out), but the UI may look inconsistent until the user interacts with the
+prompt. The team should confirm whether this UX is acceptable or whether a
+navigation-level dismissal of any modal screen should also be triggered on
+`FORCE_LOGOUT`.
+
+**3. What is the retry behaviour after a `SESSION_EXPIRED` logout?**
+`AppStateWatcher` logs the user out silently. There is a `logoutReason:
+SESSION_EXPIRED` field in `AuthState`, so the UI *can* show a "Your session has
+expired, please log in again" message — but nothing in this PR enforces that.
+Confirm that the navigation layer (outside this repo) consumes `logoutReason`
+and presents appropriate messaging, rather than silently dropping the user at
+the login screen with no context.
