@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "lib": ["ESNext"],
+    "jsx": "react-native",
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@auth/*": ["src/auth/*"],
+      "@storage/*": ["src/storage/*"],
+      "@hooks/*": ["src/hooks/*"],
+      "@store/*": ["src/store/*"],
+      "@appTypes/*": ["src/types/*"],
+      "@utils/*": ["src/utils/*"],
+      "@websocket/*": ["src/websocket/*"]
+    }
+  },
+  "include": ["src/**/*", "__tests__/**/*", "__mocks__/**/*"],
+  "exclude": ["node_modules"]
+}
