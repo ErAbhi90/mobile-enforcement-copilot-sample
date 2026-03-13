@@ -4,6 +4,8 @@ Production-style React Native TypeScript foundation for **authentication and ses
 
 ---
 
+> **New here?** Start with the [Architecture Guide](docs/ARCHITECTURE.md) for a practical, narrative walkthrough of every module, its responsibilities, and the four main auth flows before reading any code.
+
 ## Table of Contents
 
 1. [Folder Structure](#folder-structure)
