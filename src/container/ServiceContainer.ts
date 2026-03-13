@@ -23,20 +23,27 @@
  */
 
 import { SecureStorageService } from '../storage/SecureStorageService';
+import { ALL_STORAGE_KEYS } from '../storage/StorageKeys';
 import { SessionManager } from '../auth/SessionManager';
-import { AuthService, IAuthApiClient } from '../auth/AuthService';
-import { BiometricService } from '../auth/BiometricService';
-import { WebSocketService } from '../websocket/WebSocketService';
+import { AuthService, IAuthApiClient, IAuthService } from '../auth/AuthService';
+import { BiometricService, IBiometricService } from '../auth/BiometricService';
+import { WebSocketService, IWebSocketService } from '../websocket/WebSocketService';
 import { AuthStore } from '../store/AuthStore';
+import { LogoutReason } from '../types/auth.types';
 
 // ---------------------------------------------------------------------------
 // Container shape
 // ---------------------------------------------------------------------------
 
+/**
+ * All fields are typed as interfaces so callers depend on contracts, not
+ * concrete classes.  Swapping an implementation only requires changing this
+ * file, never the files that consume AppServices.
+ */
 export interface AppServices {
-  authService: AuthService;
-  biometricService: BiometricService;
-  webSocketService: WebSocketService;
+  authService: IAuthService;
+  biometricService: IBiometricService;
+  webSocketService: IWebSocketService;
   authStore: AuthStore;
 }
 
@@ -51,11 +58,20 @@ export interface AppServices {
  *   Provide a mock during integration tests.
  */
 export function createAppServices(apiClient: IAuthApiClient): AppServices {
-  const secureStorage = new SecureStorageService();
+  // ALL_STORAGE_KEYS makes clearAll() remove every named keychain entry rather
+  // than only the default (no-service) entry.
+  const secureStorage = new SecureStorageService(ALL_STORAGE_KEYS);
   const sessionManager = new SessionManager(secureStorage);
   const authService = new AuthService(secureStorage, sessionManager, apiClient);
   const biometricService = new BiometricService();
-  const webSocketService = new WebSocketService(authService);
+
+  // onForceLogout is the only coupling point between WebSocketService and the
+  // auth system.  WebSocketService receives a plain callback; it never imports
+  // or knows about AuthService.
+  const webSocketService = new WebSocketService({
+    onForceLogout: () => void authService.logout(LogoutReason.FORCE_LOGOUT),
+  });
+
   const authStore = new AuthStore(authService);
 
   return {

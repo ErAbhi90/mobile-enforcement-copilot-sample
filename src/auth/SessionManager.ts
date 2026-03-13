@@ -16,9 +16,10 @@
 
 import { ISecureStorageService } from '../storage/SecureStorageService';
 import { SessionData } from '../types/auth.types';
+import { StorageKeys } from '../storage/StorageKeys';
 
-/** Storage key for the session JSON blob. */
-const SESSION_KEY = 'auth_session_data';
+/** Storage key for the session JSON blob — defined once in StorageKeys.ts. */
+const SESSION_KEY = StorageKeys.SESSION_DATA;
 
 /** Maximum session age in milliseconds (10 hours). */
 export const SESSION_DURATION_MS = 10 * 60 * 60 * 1000;

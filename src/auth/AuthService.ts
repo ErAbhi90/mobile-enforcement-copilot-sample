@@ -29,14 +29,12 @@ import {
   LogoutReason,
 } from '../types/auth.types';
 import { createLogger } from '../utils/logger';
+import { StorageKeys } from '../storage/StorageKeys';
 
 const logger = createLogger('AuthService');
 
-/** Namespaced storage keys reduce the risk of collision with other libraries. */
-const STORAGE_KEYS = {
-  ACCESS_TOKEN: 'auth_access_token',
-  REFRESH_TOKEN: 'auth_refresh_token',
-} as const;
+/** Storage keys are defined once in StorageKeys.ts and referenced here. */
+const { ACCESS_TOKEN, REFRESH_TOKEN } = StorageKeys;
 
 // ---------------------------------------------------------------------------
 // API client contract
@@ -99,8 +97,8 @@ export class AuthService implements IAuthService {
 
       // Persist tokens before starting the session so that a crash between
       // the two writes does not leave a session without tokens.
-      await this.storageService.setItem(STORAGE_KEYS.ACCESS_TOKEN, accessToken);
-      await this.storageService.setItem(STORAGE_KEYS.REFRESH_TOKEN, refreshToken);
+      await this.storageService.setItem(ACCESS_TOKEN, accessToken);
+      await this.storageService.setItem(REFRESH_TOKEN, refreshToken);
       await this.sessionManager.startSession(user.id);
 
       this.emitState({ isAuthenticated: true, isLoading: false, user });
@@ -136,8 +134,8 @@ export class AuthService implements IAuthService {
 
     try {
       await Promise.all([
-        this.storageService.removeItem(STORAGE_KEYS.ACCESS_TOKEN),
-        this.storageService.removeItem(STORAGE_KEYS.REFRESH_TOKEN),
+        this.storageService.removeItem(ACCESS_TOKEN),
+        this.storageService.removeItem(REFRESH_TOKEN),
         this.sessionManager.clearSession(),
       ]);
       this.emitState({ isAuthenticated: false, isLoading: false, logoutReason: reason });
@@ -152,7 +150,7 @@ export class AuthService implements IAuthService {
 
   /** Returns true when both a token and a non-expired session are present. */
   async isAuthenticated(): Promise<boolean> {
-    const token = await this.storageService.getItem(STORAGE_KEYS.ACCESS_TOKEN);
+    const token = await this.storageService.getItem(ACCESS_TOKEN);
     if (!token) {
       return false;
     }
@@ -161,7 +159,7 @@ export class AuthService implements IAuthService {
 
   /** Returns the raw access token string for use in Authorization headers. */
   async getAccessToken(): Promise<string | null> {
-    return this.storageService.getItem(STORAGE_KEYS.ACCESS_TOKEN);
+    return this.storageService.getItem(ACCESS_TOKEN);
   }
 
   onStateChange(listener: (state: AuthState) => void): () => void {

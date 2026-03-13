@@ -11,7 +11,8 @@
  *  - getItem returns the password string when a credential record is found.
  *  - getItem returns null when Keychain reports false (no record).
  *  - removeItem delegates to Keychain.resetGenericPassword with the service key.
- *  - clearAll delegates to Keychain.resetGenericPassword without a service key.
+ *  - clearAll calls removeItem (resetGenericPassword with service) for every
+ *    key declared at construction time — NOT the parameterless overload.
  */
 
 import { SecureStorageService } from '../../src/storage/SecureStorageService';
@@ -24,7 +25,8 @@ describe('SecureStorageService', () => {
   let service: SecureStorageService;
 
   beforeEach(() => {
-    service = new SecureStorageService();
+    // Provide the same two test keys to every test.  clearAll() will use these.
+    service = new SecureStorageService(['key_a', 'key_b']);
     jest.clearAllMocks();
   });
 
@@ -59,9 +61,19 @@ describe('SecureStorageService', () => {
     expect(mockKeychain.resetGenericPassword).toHaveBeenCalledWith({ service: 'my_key' });
   });
 
-  it('should clear all stored values', async () => {
+  it('should delete every managed key when clearing all stored values', async () => {
     mockKeychain.resetGenericPassword.mockResolvedValue(true);
     await service.clearAll();
-    expect(mockKeychain.resetGenericPassword).toHaveBeenCalled();
+    // Each known key must be removed via its named service entry — not via the
+    // parameterless overload which only resets the default entry.
+    expect(mockKeychain.resetGenericPassword).toHaveBeenCalledWith({ service: 'key_a' });
+    expect(mockKeychain.resetGenericPassword).toHaveBeenCalledWith({ service: 'key_b' });
+    expect(mockKeychain.resetGenericPassword).toHaveBeenCalledTimes(2);
+  });
+
+  it('should do nothing when clearAll is called with no managed keys', async () => {
+    const emptyService = new SecureStorageService();
+    await emptyService.clearAll();
+    expect(mockKeychain.resetGenericPassword).not.toHaveBeenCalled();
   });
 });

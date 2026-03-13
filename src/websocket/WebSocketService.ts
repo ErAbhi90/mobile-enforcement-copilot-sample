@@ -8,8 +8,9 @@
  *  - Establish (and re-establish) the connection with the auth token as a
  *    query parameter.
  *  - Parse incoming JSON messages and dispatch the appropriate action.
- *  - On a `force_logout` event, call AuthService.logout() with the
- *    FORCE_LOGOUT reason so the UI reacts uniformly.
+ *  - On a `force_logout` event, invoke the injected onForceLogout callback.
+ *    The callback is wired in the composition root — WebSocketService does not
+ *    import or know about AuthService.
  *  - Expose connect / disconnect / isConnected for lifecycle management.
  *
  * Security note: passing the token in the query string is common for
@@ -19,8 +20,6 @@
  * token issued by a dedicated endpoint.
  */
 
-import { IAuthService } from '../auth/AuthService';
-import { LogoutReason } from '../types/auth.types';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('WebSocketService');
@@ -38,8 +37,19 @@ export interface ServerMessage {
 }
 
 // ---------------------------------------------------------------------------
-// Interface
+// Options / Interface
 // ---------------------------------------------------------------------------
+
+/**
+ * Callbacks injected into WebSocketService at construction time.
+ * Using a narrow options object rather than a full service reference keeps
+ * WebSocketService decoupled from the rest of the auth system and makes it
+ * trivial to test: just pass a jest.fn() for onForceLogout.
+ */
+export interface WebSocketServiceOptions {
+  /** Called when the server pushes a force_logout event. */
+  onForceLogout: () => void;
+}
 
 export interface IWebSocketService {
   connect(url: string, token: string): void;
@@ -55,7 +65,7 @@ export class WebSocketService implements IWebSocketService {
   private ws: WebSocket | null = null;
   private connected = false;
 
-  constructor(private readonly authService: IAuthService) {}
+  constructor(private readonly options: WebSocketServiceOptions) {}
 
   /**
    * Opens a WebSocket connection.  If a previous connection is open it is
@@ -119,10 +129,8 @@ export class WebSocketService implements IWebSocketService {
 
     switch (message.type) {
       case 'force_logout':
-        logger.warn('Server issued a force_logout — logging out');
-        // Intentionally not awaiting: the logout is fire-and-forget from the
-        // perspective of the WebSocket message handler.
-        void this.authService.logout(LogoutReason.FORCE_LOGOUT);
+        logger.warn('Server issued a force_logout — invoking onForceLogout callback');
+        this.options.onForceLogout();
         break;
       case 'session_update':
         logger.info('Received session_update event', message.payload);

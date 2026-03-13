@@ -691,9 +691,163 @@ On every cold start, the app briefly displays the login screen, then redirects t
 | Dimension | Rating | Key issue |
 |---|---|---|
 | Architecture & layering | ⭐⭐⭐⭐⭐ | Clean separation, DI throughout |
-| Testability | ⭐⭐⭐⭐⭐ | 43 tests, pure Node, fast |
-| Token lifecycle | ⭐⭐ | No refresh logic; `clearAll()` bug |
+| Testability | ⭐⭐⭐⭐⭐ | 44 tests, pure Node, fast |
+| Token lifecycle | ⭐⭐ | No refresh logic; see Section 9 for `clearAll()` fix |
 | WebSocket reliability | ⭐⭐ | No reconnect; token in URL |
 | State initialization | ⭐⭐⭐ | No `isInitializing` flag causes flicker |
 | Error handling | ⭐⭐⭐ | Logout errors silently swallowed |
 | Production readiness | ⭐⭐⭐ | Strong foundation; several gaps before shipping |
+
+---
+
+## 9. Refactoring for Separation of Concerns
+
+This section documents four targeted changes made to address the coupling concerns and correctness bugs identified in the critical review. Each change is explained in terms of what was wrong, what was changed, and why.
+
+---
+
+### Change 1 — Centralize storage keys in `StorageKeys.ts`
+
+**Problem:** `AuthService` owned a module-level `STORAGE_KEYS` constant (`auth_access_token`, `auth_refresh_token`) and `SessionManager` owned a separate `SESSION_KEY` constant (`auth_session_data`). These two modules coordinated purely by convention — if a developer added a new key to either file they had to know, from memory, not to collide with the other file's keys. There was also no single place to audit "what is written to the device keychain?"
+
+**Change:** Created `src/storage/StorageKeys.ts` with a single `StorageKeys` object and an `ALL_STORAGE_KEYS` array:
+
+```typescript
+export const StorageKeys = {
+  ACCESS_TOKEN: 'auth_access_token',
+  REFRESH_TOKEN: 'auth_refresh_token',
+  SESSION_DATA: 'auth_session_data',
+} as const;
+
+export const ALL_STORAGE_KEYS: readonly StorageKey[] = Object.values(StorageKeys);
+```
+
+Both `AuthService` and `SessionManager` now import from this file. The complete keychain footprint of the application is visible in one place.
+
+**Why this improves separation of concerns:** Two modules that have no reason to know about each other's internals were implicitly coupled through shared string literals. The centralised registry breaks that implicit coupling and makes the coordination explicit in a neutral module that neither service owns.
+
+---
+
+### Change 2 — Fix `SecureStorageService.clearAll()`
+
+**Problem:** `SecureStorageService.setItem(key, value)` stores every entry with `{ service: key }`:
+```typescript
+await Keychain.setGenericPassword(key, value, { service: key });
+```
+But `clearAll()` called `resetGenericPassword()` with no arguments, which only resets the default (no-service) keychain entry. The named service entries were never touched. This was a security defect: code that called `clearAll()` expecting a complete credential wipe would leave all tokens on the device.
+
+**Change:** `SecureStorageService` now accepts `knownKeys` at construction and `clearAll()` removes each named entry individually:
+
+```typescript
+export class SecureStorageService implements ISecureStorageService {
+  constructor(private readonly knownKeys: readonly string[] = []) {}
+
+  async clearAll(): Promise<void> {
+    await Promise.all(this.knownKeys.map(key => this.removeItem(key)));
+  }
+}
+```
+
+The composition root passes `ALL_STORAGE_KEYS` from `StorageKeys.ts`:
+```typescript
+const secureStorage = new SecureStorageService(ALL_STORAGE_KEYS);
+```
+
+The test was updated to verify the new behaviour:
+```typescript
+expect(mockKeychain.resetGenericPassword).toHaveBeenCalledWith({ service: 'key_a' });
+expect(mockKeychain.resetGenericPassword).toHaveBeenCalledWith({ service: 'key_b' });
+expect(mockKeychain.resetGenericPassword).toHaveBeenCalledTimes(2);
+```
+
+**Why this improves separation of concerns:** The knowledge of *which* keys exist now lives in one place (`StorageKeys.ts`), and the responsibility for *how* to delete them correctly lives entirely in `SecureStorageService`. The calling code does not need to understand Keychain's service-naming semantics.
+
+---
+
+### Change 3 — Decouple `WebSocketService` from `IAuthService`
+
+**Problem:** `WebSocketService` imported `IAuthService` and called `authService.logout(LogoutReason.FORCE_LOGOUT)` directly when it received a `force_logout` event. This created a hard compile-time dependency between the WebSocket layer and the authentication system. To test `WebSocketService`, you had to mock a full `IAuthService` with five methods. If the logout signature ever changed, `WebSocketService` was a required edit. And `WebSocketService` could not be reused in any context that did not have an `AuthService`.
+
+**Change:** The constructor now accepts a `WebSocketServiceOptions` object containing a single callback:
+
+```typescript
+export interface WebSocketServiceOptions {
+  onForceLogout: () => void;
+}
+
+export class WebSocketService implements IWebSocketService {
+  constructor(private readonly options: WebSocketServiceOptions) {}
+  // ...
+  case 'force_logout':
+    this.options.onForceLogout();
+    break;
+}
+```
+
+The *decision* of what to do on force-logout — specifically, that it should call `authService.logout(LogoutReason.FORCE_LOGOUT)` — moves to the composition root:
+
+```typescript
+const webSocketService = new WebSocketService({
+  onForceLogout: () => void authService.logout(LogoutReason.FORCE_LOGOUT),
+});
+```
+
+The test simplifies from a five-method mock to a single `jest.fn()`:
+
+```typescript
+const mockOnForceLogout = jest.fn();
+wsService = new WebSocketService({ onForceLogout: mockOnForceLogout });
+// ...
+expect(mockOnForceLogout).toHaveBeenCalledTimes(1);
+```
+
+**Why this improves separation of concerns:** `WebSocketService` now has one job: maintain the connection and notify registered callbacks when server events arrive. It has no knowledge of the authentication system. The decision to map `force_logout` → `authService.logout(FORCE_LOGOUT)` belongs in the composition root, where all wiring decisions live.
+
+---
+
+### Change 4 — Type `AppServices` fields as interfaces
+
+**Problem:** `AppServices` used concrete class types:
+
+```typescript
+export interface AppServices {
+  authService: AuthService;
+  biometricService: BiometricService;
+  webSocketService: WebSocketService;
+  authStore: AuthStore;
+}
+```
+
+Any file that consumed `AppServices` had to import the concrete implementation class just to get the type. If you replaced `AuthService` with a `FederatedAuthService`, every consumer's type annotation would break. The `AppServices` interface was not actually an interface in any useful sense.
+
+**Change:**
+```typescript
+export interface AppServices {
+  authService: IAuthService;
+  biometricService: IBiometricService;
+  webSocketService: IWebSocketService;
+  authStore: AuthStore;
+}
+```
+
+Consumers now receive the narrowest type they need to work with — the interface contract — not a reference to the concrete class.
+
+**Why this improves separation of concerns:** The `AppServices` object is the boundary between the composition root and the rest of the application. When fields are typed as interfaces, the rest of the application truly depends only on contracts, not on implementations. Swapping a concrete service class requires changing exactly one file: `ServiceContainer.ts`.
+
+---
+
+### After-refactoring dependency graph (changes highlighted)
+
+```
+ServiceContainer  ──→ StorageKeys          ← NEW (was implicit in two places)
+  ├─→ SecureStorageService(ALL_STORAGE_KEYS)  ← knownKeys parameter added
+  ├─→ SessionManager          → StorageKeys  ← was string literal
+  ├─→ AuthService             → StorageKeys  ← was local STORAGE_KEYS constant
+  │                           → SessionManager (ISessionManager)
+  │                           → IAuthApiClient
+  ├─→ BiometricService
+  ├─→ WebSocketService({ onForceLogout })    ← was IAuthService reference
+  └─→ AuthStore               → IAuthService
+```
+
+The three inter-service coupling arrows that previously crossed layer boundaries (`WebSocketService → IAuthService`, implicit key sharing) have been replaced by: one callback (`onForceLogout`), one shared constants file (`StorageKeys`), and one constructor parameter (`knownKeys`).

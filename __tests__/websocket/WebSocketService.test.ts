@@ -7,19 +7,21 @@
  * exposes helper methods (simulateOpen, simulateMessage, simulateClose) so
  * tests can drive the full message lifecycle synchronously.
  *
+ * Because WebSocketService now receives a plain onForceLogout callback rather
+ * than a full IAuthService, the mock is a single jest.fn() — no need to stub
+ * multiple service methods.
+ *
  * Test plan:
  *  - connect() creates a WebSocket to the expected URL with the token.
  *  - After the connection opens, isConnected() returns true.
- *  - A `force_logout` message triggers authService.logout(FORCE_LOGOUT).
- *  - An unrelated message type does NOT trigger logout.
+ *  - A `force_logout` message invokes the onForceLogout callback.
+ *  - An unrelated message type does NOT invoke the callback.
  *  - A malformed (non-JSON) message is ignored without throwing.
  *  - disconnect() closes the socket and isConnected() returns false.
  *  - connect() disconnects any existing connection before opening a new one.
  */
 
 import { WebSocketService } from '../../src/websocket/WebSocketService';
-import { IAuthService } from '../../src/auth/AuthService';
-import { AuthState, LogoutReason } from '../../src/types/auth.types';
 
 // ---------------------------------------------------------------------------
 // WebSocket stub
@@ -63,33 +65,18 @@ afterAll(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Auth service mock
-// ---------------------------------------------------------------------------
-
-const mockAuthService: jest.Mocked<
-  Pick<IAuthService, 'logout' | 'login' | 'isAuthenticated' | 'getAccessToken' | 'onStateChange'>
-> = {
-  logout: jest.fn(),
-  login: jest.fn(),
-  isAuthenticated: jest.fn(),
-  getAccessToken: jest.fn(),
-  onStateChange: jest.fn((cb: (state: AuthState) => void) => {
-    cb({ isAuthenticated: false, isLoading: false });
-    return jest.fn();
-  }),
-};
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 describe('WebSocketService', () => {
   let wsService: WebSocketService;
   let latestWs: MockWebSocket;
+  let mockOnForceLogout: jest.Mock;
 
   beforeEach(() => {
     MockWebSocket.instances.length = 0;
-    wsService = new WebSocketService(mockAuthService as unknown as IAuthService);
+    mockOnForceLogout = jest.fn();
+    wsService = new WebSocketService({ onForceLogout: mockOnForceLogout });
     jest.clearAllMocks();
   });
 
@@ -110,25 +97,25 @@ describe('WebSocketService', () => {
     expect(wsService.isConnected()).toBe(true);
   });
 
-  it('should trigger force logout when a force_logout message arrives', () => {
+  it('should invoke the onForceLogout callback when a force_logout message arrives', () => {
     const ws = connect();
     ws.simulateOpen();
     ws.simulateMessage(JSON.stringify({ type: 'force_logout' }));
-    expect(mockAuthService.logout).toHaveBeenCalledWith(LogoutReason.FORCE_LOGOUT);
+    expect(mockOnForceLogout).toHaveBeenCalledTimes(1);
   });
 
-  it('should NOT trigger logout for non-force_logout message types', () => {
+  it('should NOT invoke the callback for non-force_logout message types', () => {
     const ws = connect();
     ws.simulateOpen();
     ws.simulateMessage(JSON.stringify({ type: 'session_update', payload: { ttl: 3600 } }));
-    expect(mockAuthService.logout).not.toHaveBeenCalled();
+    expect(mockOnForceLogout).not.toHaveBeenCalled();
   });
 
   it('should ignore malformed (non-JSON) messages without throwing', () => {
     const ws = connect();
     ws.simulateOpen();
     expect(() => ws.simulateMessage('not valid json }')).not.toThrow();
-    expect(mockAuthService.logout).not.toHaveBeenCalled();
+    expect(mockOnForceLogout).not.toHaveBeenCalled();
   });
 
   it('should set isConnected() to false after disconnect()', () => {
