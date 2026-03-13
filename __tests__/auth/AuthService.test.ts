@@ -70,7 +70,7 @@ const validTokens: AuthTokens = {
   user: { id: 'user-1', username: 'officer1', email: 'o1@hq.gov', role: 'officer' },
 };
 
-const credentials: LoginCredentials = { username: 'officer1', password: 's3cret' };
+const credentials: LoginCredentials = { username: 'officer1', password: 'test-password' };
 
 // ---------------------------------------------------------------------------
 // Tests
